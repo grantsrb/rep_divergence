@@ -26,12 +26,6 @@ from matplotlib.patches import Rectangle
 
 IGNORE_INDEX = -100
 
-# set seed
-seed = 42
-torch.manual_seed(seed)
-np.random.seed(seed)
-random.seed(seed)
-
 """
 This is for tutorial
 
@@ -77,20 +71,12 @@ def pricing_tag_game_example_sampler(
     amount,
     lower_bound,
     bound_width,
-    sample = None
 ):
-    if sample is None:
-        (
+    (
         lower_bound_sample,
         upper_bound_sample,
         amount_sample,
-        ) = pricing_tag_game_config_sampler(amount, lower_bound, bound_width)
-    else:
-        (
-        lower_bound_sample,
-        upper_bound_sample,
-        amount_sample,
-        ) = sample
+    ) = pricing_tag_game_config_sampler(amount, lower_bound, bound_width)
     lower_bound_str = "%.2f" % lower_bound_sample
     upper_bound_str = "%.2f" % upper_bound_sample
     if amount_sample >= float(lower_bound_str) and amount_sample <= float(
@@ -107,7 +93,7 @@ def pricing_tag_game_example_sampler(
     output_ids = (torch.ones(input_ids.shape[0]) * -100).long().tolist()
     output_ids[-1] = label
     input_ids = input_ids.tolist()
-    #assert len(input_ids) == 82
+    assert len(input_ids) == 82
 
     return input_ids, output_ids
 
@@ -155,14 +141,13 @@ def factual_sampler(
     amount=None,
     lower_bound=None,
     bound_width=None,
-    samples=None
 ):
     all_input_ids = []
     all_output_ids = []  # this one does not have input ids, etc..
-    for i in range(max_n_training_examples):
+    for _ in range(max_n_training_examples):
         if "pricing_tag" in game:
             input_ids, output_ids = pricing_tag_game_example_sampler(
-                tokenizer, amount, lower_bound, bound_width, samples[i]
+                tokenizer, amount, lower_bound, bound_width
             )
         elif game == "continent_retrieval":
             pass

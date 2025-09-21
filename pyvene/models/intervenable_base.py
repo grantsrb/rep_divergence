@@ -21,7 +21,7 @@ from .interventions import (
 )
 
 from torch import optim
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup, GenerationConfig
 from dataclasses import dataclass
 from transformers.utils import ModelOutput
 from tqdm import tqdm, trange
@@ -1801,6 +1801,7 @@ class IntervenableModel(BaseModel):
         output_original_output: Optional[bool] = False,
         return_dict: Optional[bool] = None,
         use_cache: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = False,
     ):
         """
         Main forward function that serves a wrapper to
@@ -1898,7 +1899,10 @@ class IntervenableModel(BaseModel):
         base_outputs = None
         if output_original_output:
             # returning un-intervened output with gradients
-            base_outputs = self.model(**base)
+            base_outputs = self.model(
+                **base,
+                output_hidden_states=output_hidden_states
+            )
 
         try:
             # intervene
@@ -1927,8 +1931,10 @@ class IntervenableModel(BaseModel):
                 model_kwargs["labels"] = labels
             if use_cache is not None and 'use_cache' in self.model.config.to_dict(): # for transformer models
                 model_kwargs["use_cache"] = use_cache
+            if "output_hidden_states" not in model_kwargs and output_hidden_states is not None:
+                model_kwargs["output_hidden_states"] = output_hidden_states
 
-            counterfactual_outputs = self.model(**base, **model_kwargs)
+            counterfactual_outputs = self.model( **base, **model_kwargs, )
 
             set_handlers_to_remove.remove()
 
@@ -1980,6 +1986,7 @@ class IntervenableModel(BaseModel):
         intervene_on_prompt: bool = False,
         subspaces: Optional[List] = None,
         output_original_output: Optional[bool] = False,
+        output_hidden_states: Optional[bool] = False,
         **kwargs,
     ):
         """
@@ -2039,7 +2046,14 @@ class IntervenableModel(BaseModel):
         base_outputs = None
         if output_original_output:
             # returning un-intervened output
-            base_outputs = self.model.generate(**base, **kwargs)
+            if output_hidden_states:
+                if "generation_config" not in kwargs or not kwargs["generation_config"]:
+                    kwargs["generation_config"] = GenerationConfig(
+                        output_hidden_states=True,
+                    )
+                else:
+                    kwargs["generation_config"].output_hidden_states = True
+            base_outputs = self.model.generate( **base, **kwargs, )
 
         set_handlers_to_remove = None
         try:
@@ -2064,9 +2078,14 @@ class IntervenableModel(BaseModel):
                 )
             
             # run intervened generate
-            counterfactual_outputs = self.model.generate(
-                **base, **kwargs
-            )
+            if output_hidden_states:
+                if "generation_config" not in kwargs or not kwargs["generation_config"]:
+                    kwargs["generation_config"] = GenerationConfig(
+                        output_hidden_states=True,
+                    )
+                else:
+                    kwargs["generation_config"].output_hidden_states = True
+            counterfactual_outputs = self.model.generate( **base, **kwargs, )
             
             collected_activations = []
             if self.return_collect_activations:
