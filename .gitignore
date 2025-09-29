@@ -154,3 +154,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# General Analysis Result Files
+*/figs/
+*/csvs/
+*/data/
+*/results/
