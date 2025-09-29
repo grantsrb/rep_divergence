@@ -1,4 +1,4 @@
-# Accompanying code for exploring representational divergence in causal interventions
+# Accompanying code for exploring representational divergence from causal interventions
 
 This code base contains the code to replicate the experiments presented in the paper
 "Addressing divergent representations from causal interventions on neural networks."
