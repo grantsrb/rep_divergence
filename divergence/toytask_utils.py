@@ -38,68 +38,68 @@ def make_tasks(task_division="distinct_y", varbs=None):
             tensor with x,y values in each row. Further, assumes x can
             be -1 or 1, and y can be 0,1,2, 3, or 4.
     """
-    #if task_division=="distinct_y":
-    #    task1_tups = {
-    #                (1,0),
-    #                (1,1),
-    #                (1,2),
-    #                (1,3),
-    #        (-1,4)
-    #    }
-    #    task2_tups = {
-    #                (1,4),
-    #        (-1,0),
-    #        (-1,1),
-    #        (-1,2),
-    #        (-1,3),
-    #    }
-    #elif task_division=="distinct_y_overlap":
-    #    task1_tups = {
-    #                (1,0),
-    #        (-1,1),
-    #                (1,2),
-    #                (1,3),
-    #        (-1,4),
-    #    }
-    #    task2_tups = {
-    #        (-1,0),
-    #        (-1,1),
-    #                (1,2),
-    #        (-1,2),
-    #        (-1,3),
-    #                (1,4),
-    #    }
-    #elif task_division=="distinct_xy":
-    #    task1_tups = {
-    #                (1,0),      
-    #        (-1,1), 
-    #    }
-    #    task2_tups = {
+    if task_division=="distinct_y":
+        task1_tups = {
+                    (1,0),
+                    (1,1),
+                    (1,2),
+                    (1,3),
+            (-1,4)
+        }
+        task2_tups = {
+                    (1,4),
+            (-1,0),
+            (-1,1),
+            (-1,2),
+            (-1,3),
+        }
+    elif task_division=="distinct_y_overlap":
+        task1_tups = {
+                    (1,0),
+            (-1,1),
+                    (1,2),
+                    (1,3),
+            (-1,4),
+        }
+        task2_tups = {
+            (-1,0),
+            (-1,1),
+                    (1,2),
+            (-1,2),
+            (-1,3),
+                    (1,4),
+        }
+    elif task_division=="distinct_xy":
+        task1_tups = {
+                    (1,0),      
+            (-1,1), 
+        }
+        task2_tups = {
 
 
-    #        (-1,2), 
-    #                (1,3),      
-    #    }
-    #elif task_division=="distinct_xy_overlap":
-    #    task1_tups = {
-    #                (1,0),      
-    #        (-1,1), 
-    #    }
-    #    task2_tups = {
+            (-1,2), 
+                    (1,3),      
+        }
+    elif task_division=="distinct_xy_overlap":
+        task1_tups = {
+                    (1,0),      
+            (-1,1), 
+        }
+        task2_tups = {
 
-    #        (-1,1), 
-    #                (1,2),      
-    #    }
-    #elif task_division=="xor":
-    #    task1_tups = {
-    #                (1,0),      
-    #        (-1,1), 
-    #    }
-    #    task2_tups = {
-    #        (-1,0), 
-    #               (1,1),      
-    #    }
-    if task_division=="original":
+            (-1,1), 
+                    (1,2),      
+        }
+    elif task_division=="xor":
+        task1_tups = {
+                    (1,0),      
+            (-1,1), 
+        }
+        task2_tups = {
+            (-1,0), 
+                   (1,1),      
+        }
+    elif task_division=="original":
         task1_tups = {
             (-1,0), (1,0),
             
@@ -320,4 +320,9 @@ all_divisions = [
     "random",
     "random_overlap",
     "inner_square",
+    "xor",
+    "distinct_xy_overlap",
+    "distinct_xy",
+    "distinct_y_overlap",
+    "distinct_y",
 ]
