@@ -15,8 +15,12 @@ a new virtual environment, and then you can run the following:
 ```
 git clone git@github.com:grantsrb/rep_divergence.git
 cd rep_divergence
+pip install -r requirements.txt
 pip install -e .
 ```
+
+## Figure replication
+The code to replicate the main results in the paper are located in the `divergence` folder. The majority of the analyses are in jupyter notebooks.
 
 ## Citation
 If you use this repository, you can cite the paper:
@@ -30,7 +34,7 @@ If you use this repository, you can cite the paper:
 }
 ```
 
-Please also consider to citing the pyvene library:
+Please also consider citing the pyvene library:
 ```bibtex
 @inproceedings{wu-etal-2024-pyvene,
     title = "pyvene: A Library for Understanding and Improving {P}y{T}orch Models via Interventions",
