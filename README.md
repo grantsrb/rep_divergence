@@ -3,7 +3,7 @@
 This code base contains the code to replicate the experiments presented in the paper
 "Addressing divergent representations from causal interventions on neural networks."
 
-The code to replicate each experiment can be found in the folder `divergence`. 
+The code to replicate each experiment can be found in the `divergence` folder. 
 
 ## Installation
 
