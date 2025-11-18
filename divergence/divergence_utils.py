@@ -1,14 +1,20 @@
 import math
 import os
+from tqdm import tqdm
+
 import torch
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from geomloss import SamplesLoss
-#from fca.projections import perform_eigen_pca
 from scipy.optimize import linear_sum_assignment
-#import scipy.optimize.linear_sum_assignment as linear_sum_assignment
+from scipy.stats import sem
+
+
+from sklearn.neighbors import NearestNeighbors, KernelDensity
+from sklearn.decomposition import PCA
+from sklearn.svm import OneClassSVM
 
 def device_fn(device):
     if device==-1:
@@ -244,8 +250,8 @@ def visualize_states(
     )
     vecs = ret["transformed_X"]
     
-    natty_vecs = torch.tensor(vecs[:len(natty_states)]).cpu()
-    intrv_vecs = torch.tensor(vecs[len(natty_states):]).cpu()
+    natty_vecs = torch.tensor(vecs[:len(natty_states)]).cpu().float()
+    intrv_vecs = torch.tensor(vecs[len(natty_states):]).cpu().float()
     expl_vars = torch.tensor(ret["proportion_expl_var"]).float().cpu()
     
     if xdim is None or ydim is None:
@@ -289,60 +295,76 @@ def visualize_states(
             save_name=save_name,
         )
     
+    return collect_divergences(natty_vecs, intrv_vecs)
+
+
+def collect_divergences(
+    natty_vecs,
+    intrv_vecs,
+    sample_size=5000,
+):
+    if sample_size:
+        samp = torch.randperm(len(natty_vecs))[:sample_size].long()
+        natty_vecs = natty_vecs[samp]
+        intrv_vecs = intrv_vecs[samp]
+        
     mse = ((natty_vecs-intrv_vecs)**2).mean().item()
+
+    half = len(natty_vecs)//2
     perm = torch.randperm(len(natty_vecs)).long()
-    nat = natty_vecs[perm[:len(natty_vecs)//2]]
-    perm = torch.randperm(len(intrv_vecs)).long()
-    intrv = intrv_vecs[perm[:len(natty_vecs)//2]]
-    emd = sample_emd(
-        nat,
-        intrv,
-        sample_type=emd_sample_type,
-        normalize=normalize_emd,
-        sample_size=emd_sample_size
-    )
-    perm = torch.randperm(len(natty_vecs)).long()
-    nat = natty_vecs[perm[:len(natty_vecs)//2]]
-    perm = torch.randperm(len(natty_vecs)).long()
-    intrv = natty_vecs[perm[:len(natty_vecs)//2]]
-    base_emd = sample_emd(
-        nat,
-        intrv,
+    nat = natty_vecs[perm[:half]]
+    intrv = intrv_vecs[perm[half:]]
+    div_dict = divergences(nat, intrv)
+    intrv = natty_vecs[perm[half:]]
+    div_dict2 = divergences(nat, intrv)
+    return {
+        "mse": mse,
+        **div_dict,
+        **{"base_"+k:v for k,v in div_dict2.items()}
+    }
+
+    
+
+def divergences(
+        natty_vecs,
+        intrv_vecs,
+        emd_sample_type="permute",
+        normalize_emd=True,
+        emd_sample_size=5000,
+):
+    div_dict = {}
+
+    div_dict["emd"] = sample_emd(
+        natty_vecs,
+        intrv_vecs,
         sample_type=emd_sample_type,
         normalize=normalize_emd,
         sample_size=emd_sample_size
     )
 
-    half = len(natty_vecs)//2
-    perm = torch.randperm(len(natty_vecs)).long()
-    intrv = intrv_vecs[perm[:half]].float()
-    natty = natty_vecs[perm[half:]].float()
+    cost_mtx = 1-get_cor_mtx(intrv_vecs.T, natty_vecs.T, zscore=True, to_numpy=True) # half x half
+    _, div_dict["cost_cos"] = optimal_pairs(cost_mtx)
     
-    cost_mtx = 1-get_cor_mtx(intrv.T, natty.T, zscore=True, to_numpy=True) # half x half
-    _, min_cost_cos = optimal_pairs(cost_mtx)
+    cost_mtx = get_mse_mtx(intrv_vecs, natty_vecs, to_numpy=True) # half x half
+    _, div_dict["cost_mse"] = optimal_pairs(cost_mtx)
+
+    local_pca = LocalPCADistance(natty_vecs.cpu().float().numpy())
+    div_dict["local_pca"] = local_pca.score(
+        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
     
-    cost_mtx = get_mse_mtx(intrv, natty, to_numpy=True) # half x half
-    _, min_cost_mse = optimal_pairs(cost_mtx)
+    local_recon = LLEReconstructionDistance(natty_vecs.cpu().float().numpy())
+    div_dict["lle_recon"] = local_recon.score(
+        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
+
+    kde = KDEDensityScore(natty_vecs.cpu().float().numpy(), bandwidth=0.4)
+    div_dict["kde"] = kde.score(
+        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
     
-    intrv = natty_vecs[perm[:half]].float()
-    natty = natty_vecs[perm[half:]].float()
+    svm = OneClassSVMDistance(natty_vecs.cpu().float().numpy())
+    div_dict["svm"] = svm.score(
+        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
     
-    cost_mtx = 1-get_cor_mtx(intrv.T, natty.T, zscore=True, to_numpy=True) # half x half
-    _, base_min_cost_cos = optimal_pairs(cost_mtx)
-    
-    cost_mtx = get_mse_mtx(intrv, natty, to_numpy=True) # half x half
-    _, base_min_cost_mse = optimal_pairs(cost_mtx)
-    
-    return {
-        "mse": round(mse, sig_figs),
-        "emd": round(emd, sig_figs),
-        "base_emd": round(base_emd, sig_figs),
-        "base_cost_cos": base_min_cost_cos,
-        "cost_cos": min_cost_cos,
-        "base_cost_mse": base_min_cost_mse,
-        "cost_mse": min_cost_mse,
-    }
-    
+    return {k:float(v) for k,v in div_dict.items()}
 
 ###############################################################
 # Linear Algebra Utilities
@@ -782,6 +804,113 @@ def perform_eigen_pca(
         ret_dict = {k: v.cpu().detach().numpy() for k, v in ret_dict.items()}
 
     return ret_dict
+
+
+class LocalPCADistance:
+    def __init__(self, X, k=20, d=None):
+        """
+        X: (n, D) reference point cloud (the manifold samples)
+        k: neighbors used to estimate local tangent
+        d: intrinsic dim estimate (if None, keep components explaining 95% var)
+        """
+        self.X = np.asarray(X, float)
+        self.nn = NearestNeighbors(n_neighbors=k).fit(self.X)
+        self.k = k
+        self.d = d
+
+    def score(self, vecs, pca_expl_var=0.95, verbose=False):
+        """
+        Returns: residual norm (Euclidean) to the locally linear manifold at x.
+        Larger = more off-manifold.
+        """
+        if len(vecs.shape)<=1: vecs = vecs[None]
+        res_norms = []
+        rng = range(len(vecs))
+        if verbose:
+            rng = tqdm(rng)
+        for samp_idx in rng:
+            x = np.asarray(vecs[samp_idx], float).reshape(1, -1)
+            idx = self.nn.kneighbors(x, return_distance=False)[0]
+            Xk = self.X[idx]
+            xc = Xk - Xk.mean(0, keepdims=True)
+    
+            pca = PCA().fit(xc)
+            if self.d is None:
+                # Keep the smallest d achieving 95% variance (at least 1)
+                cum = np.cumsum(pca.explained_variance_ratio_)
+                d = max(1, int(np.searchsorted(cum, pca_expl_var) + 1))
+            else:
+                d = self.d
+    
+            U = pca.components_[:d]                # (d, D)
+            proj = (x - Xk.mean(0))[0] @ U.T @ U   # project onto local subspace
+            resid = (x - Xk.mean(0))[0] - proj
+            res_norm = float(np.linalg.norm(resid))
+            res_norms.append(res_norm)
+        return np.asarray(res_norms)
+
+
+class LLEReconstructionDistance:
+    def __init__(self, X, k=20, reg=1e-3):
+        self.X = np.asarray(X, float)
+        self.nn = NearestNeighbors(n_neighbors=k).fit(self.X)
+        self.k = k
+        self.reg = reg
+
+    def score(self, vecs, verbose=False):
+        if len(vecs.shape)<=1: vecs = vecs[None]
+        recons = []
+        rng = range(len(vecs))
+        if verbose:
+            rng = tqdm(rng)
+        for samp_idx in rng:
+            x = np.asarray(vecs[samp_idx], float)
+            idx = self.nn.kneighbors([x], return_distance=False)[0]
+            Xi = self.X[idx]                  # (k, D)
+            Zi = Xi - x                       # neighbor diffs
+            C = Zi @ Zi.T                     # (k, k)
+            C.flat[::C.shape[0]+1] += self.reg * np.trace(C) / self.k  # reg on diag
+            # Solve C w = 1, then normalize so sum w = 1 (Roweis & Saul 2000)
+            ones = np.ones(self.k)
+            w = np.linalg.solve(C, ones)
+            w /= w.sum()
+            recon = (w @ Xi)
+            recons.append(float(np.linalg.norm(x - recon)))
+        return np.asarray(recons)
+
+class KDEDensityScore:
+    def __init__(self, X, bandwidth=0.5, kernel="gaussian"):
+        self.kde = KernelDensity(bandwidth=bandwidth, kernel=kernel).fit(X)
+
+    def score(self, vecs, verbose=False, *args, **kwargs):
+        if len(vecs.shape)<=1: vecs = vecs[None]
+        neg_logps = []
+        rng = range(len(vecs))
+        if verbose:
+            rng = tqdm(rng)
+        for samp_idx in rng:
+            # Higher value = *more* typical; invert for an off-manifold score
+            logp = float(self.kde.score_samples(np.asarray(vecs[samp_idx], float).reshape(1, -1))[0])
+            neg_logps.append(-logp)
+        return np.asarray(neg_logps)  # larger = more off-manifold
+
+class OneClassSVMDistance:
+    def __init__(self, X, nu=0.05, gamma="scale"):
+        self.svm = OneClassSVM(nu=nu, kernel="rbf", gamma=gamma).fit(X)
+
+    def score(self, vecs, verbose=False):
+        if len(vecs.shape)<=1: vecs = vecs[None]
+        scores = []
+        rng = range(len(vecs))
+        if verbose:
+            rng = tqdm(rng)
+        for samp_idx in rng:
+            # More negative = more off-manifold; flip sign to make larger = more off
+            v = vecs[samp_idx]
+            arr = np.asarray(vecs[samp_idx], float).reshape(1, -1)
+            score = -self.svm.decision_function(arr)[0]
+            scores.append(float(score))
+        return np.asarray(scores)
 
 
 __all__ = [

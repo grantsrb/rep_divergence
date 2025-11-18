@@ -12,12 +12,10 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+from datetime import datetime
+import time
 
-# This library is our indicator that the required installs
-# need to be done.
 import pyvene
-
-
 
 import torch
 from tqdm import tqdm, trange
@@ -42,19 +40,29 @@ from pyvene import set_seed, count_parameters
 
 from divergence_utils import (
     get_cor_mtx, get_mse_mtx, optimal_pairs, sample_without_replacement,
-    visualize_states,
+    visualize_states, collect_divergences,
 )
 
 
 set_seed(42)
-cl_eps_range = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 50.0]
-n_seeds = 3
-train_epochs = 5
+
+cl_eps_range = [100.0]
+do_rotate = False # Determine whether to rotate the intervention vectors
+    # and applying the boundary mask before calculating the loss with the CL vectors.
+    # If False, the intervention vectors are not rotated and the boundary mask is
+    # not applied before calculating the loss with the CL vectors.
+n_seeds = 3 # will repeat the whole experiment this many times
+train_epochs = 3
 train_batch_size = 32
+cl_collection_batch_size = 128
+eval_batch_size = 128
 train_gradient_accumulation_steps = 4
-n_divergence_samples = 5
+n_divergence_samples = 10
 use_numpy = False
 debug = False
+save_actvs_dir = "/data2/grantsrb/rep_divergence/cl_boundless_actvs/"
+save_stamp = datetime.fromtimestamp(time.time()).strftime("%Y%m%d_%H%M%S")
+save_stamp = str(save_stamp)
 
 for arg in sys.argv[1:]:
     if "debug" in arg:
@@ -65,6 +73,9 @@ config, tokenizer, llama = create_llama()
 _ = llama.to("cuda")  # single gpu
 _ = llama.eval()  # always no grad on the model
 
+if save_actvs_dir is not None and not debug:
+    if not os.path.exists(save_actvs_dir):
+        os.makedirs(save_actvs_dir)
 
 # ### Create training dataset for our trainable intervention (Boundless DAS)
 
@@ -75,7 +86,6 @@ raw_data = bound_alignment_sampler(
     tokenizer, 10000, [lower_bound_alignment_example_sampler]
 )
 
-batch_size = 64
 n_train = 8000
 n_eval = 1000
 n_test = 1000
@@ -117,7 +127,7 @@ train_dataset = Dataset.from_dict(
 ).with_format("torch")
 train_dataloader = DataLoader(
     train_dataset,
-    batch_size=batch_size,
+    batch_size=cl_collection_batch_size,
     shuffle=False,
 )
 eval_dataset = Dataset.from_dict(
@@ -132,7 +142,7 @@ eval_dataset = Dataset.from_dict(
 ).with_format("torch")
 eval_dataloader = DataLoader(
     eval_dataset,
-    batch_size=batch_size,
+    batch_size=cl_collection_batch_size,
     shuffle=False,
 )
 test_dataset = Dataset.from_dict(
@@ -147,7 +157,7 @@ test_dataset = Dataset.from_dict(
 ).with_format("torch")
 test_dataloader = DataLoader(
     test_dataset,
-    batch_size=batch_size,
+    batch_size=cl_collection_batch_size,
     shuffle=False,
 )
 
@@ -205,11 +215,16 @@ def collect_source_vectors(intervenable, dataloader, source_key="cl_input_ids"):
 # collecting the source vectors from the Boundless DAS intervention module.
 print("Collecting train set cl vectors")
 train_cl_vectors = collect_source_vectors(intervenable, train_dataloader).cpu()
-print("Collecting eval set cl vectors")
-eval_cl_vectors = collect_source_vectors(intervenable, eval_dataloader).cpu()
+#print("Collecting eval set cl vectors")
+#eval_cl_vectors = collect_source_vectors(intervenable, eval_dataloader).cpu()
 print("Collecting test set cl vectors")
 test_cl_vectors = collect_source_vectors(intervenable, test_dataloader).cpu()
 
+test_dataloader = DataLoader(
+    test_dataset,
+    batch_size=eval_batch_size,
+    shuffle=False,
+)
 
 combination_type = "full_match" 
 cl_keys = ["full_match"]
@@ -263,7 +278,13 @@ def cl_loss_fn(intrv_vectors, cl_vectors, loss_type="both"):
         cos = 1-torch.cosine_similarity(intrv_vectors,cl_vectors,dim=-1).mean()
     return mse+cos
 
-def rotated_cl_loss(das_object, intrv_vectors, cl_vectors, mask_idx=0, loss_type="both"):
+def rotated_cl_loss(
+        das_object,
+        intrv_vectors,
+        cl_vectors,
+        mask_idx=0,
+        loss_type="both"
+):
     """
     Calculate the loss between the intervention vectors and the cl vectors.
     """
@@ -293,9 +314,18 @@ def calculate_cl_loss(
         cl_keeps = ~cl_failure_dict[cl_key].to(device)[cl_idxs]
         if do_rotate:
             cl_l = rotated_cl_loss(
-                das_object, intrv_vectors[cl_keeps], cl_vectors[cl_keeps], loss_type="both")
+                das_object,
+                intrv_vectors[cl_keeps],
+                cl_vectors[cl_keeps],
+                mask_idx=0,
+                loss_type="both"
+            )
         else:
-            cl_l = cl_loss_fn(intrv_vectors[cl_keeps], cl_vectors[cl_keeps], loss_type="both")
+            cl_l = cl_loss_fn(
+                intrv_vectors[cl_keeps],
+                cl_vectors[cl_keeps],
+                loss_type="both"
+            )
         cl_loss += cl_l
         cl_vector_dict[cl_key] = cl_vector_dict[cl_key].cpu()
         cl_failure_dict[cl_key] = cl_failure_dict[cl_key].cpu()
@@ -379,15 +409,16 @@ for seed in range(n_seeds):
         print("intervention trainable parameters: ", intervenable.count_parameters())
         train_iterator = trange(0, int(epochs), desc="Epoch")
         total_step = 0
-        train_actn_loss = 0.0
-        train_cl_loss = 0.0
-        train_accuracy = 0.0
         for epoch in train_iterator:
             epoch_iterator = tqdm(
                 train_dataloader, desc=f"Epoch: {epoch}", position=0, leave=True
             )
             train_intrv_hstates = []
             train_cl_hstates = []
+            train_actn_loss = 0.0
+            train_cl_loss = 0.0
+            train_accuracy = 0.0
+            n_train_steps = len(epoch_iterator)
             for step, inputs in enumerate(epoch_iterator):
                 for k, v in inputs.items():
                     if v is not None and isinstance(v, torch.Tensor):
@@ -413,18 +444,22 @@ for seed in range(n_seeds):
                     cl_vector_dict=train_cl_vector_dict,
                     cl_failure_dict=train_cl_failure_dict,
                     das_object=das_object,
-                    do_rotate=True,
+                    do_rotate=do_rotate,
                 )
                 loss = loss + cl_eps*cl_loss
 
-                train_actn_loss += actn_loss.item()/len(train_dataloader)
-                train_cl_loss += cl_loss.item()/len(train_dataloader)
-                train_accuracy += eval_metrics["accuracy"]/len(train_dataloader)
+                train_actn_loss += actn_loss.item()/n_train_steps
+                train_cl_loss += cl_loss.item()/n_train_steps
+                train_accuracy += eval_metrics["accuracy"]/n_train_steps
 
                 # Print Loss
                 loss_str = round(actn_loss.item(), 2)
                 cl_loss_str = round(cl_loss.item(), 4)
-                epoch_iterator.set_postfix({"loss": loss_str, "acc": eval_metrics["accuracy"], "CL": cl_loss_str})
+                epoch_iterator.set_postfix({
+                    "loss": loss_str,
+                    "acc": eval_metrics["accuracy"],
+                    "CL": cl_loss_str
+                })
         
                 if gradient_accumulation_steps > 1:
                     loss = loss / gradient_accumulation_steps
@@ -441,6 +476,9 @@ for seed in range(n_seeds):
                 
                 train_intrv_hstates.append(comms_dict["intrv_vectors"].cpu())
                 train_cl_hstates.append(train_cl_vector_dict[cl_keys[0]][inputs["indices"].cpu().long()].cpu())
+            print("Train Acc:", train_accuracy)
+            print("\tActn Loss:", train_actn_loss)
+            print("\tCL Loss:", train_cl_loss)
             torch.cuda.empty_cache()
         train_eval_metrics = eval_metrics
         torch.cuda.empty_cache()
@@ -454,6 +492,8 @@ for seed in range(n_seeds):
         print("Train Acc:", train_accuracy)
         print("\tActn Loss:", train_actn_loss)
         print("\tCL Loss:", train_cl_loss)
+
+        ###### Evaluation ######
         intervenable.model.eval()
         device = "cuda"
         # evaluation on the test set
@@ -492,7 +532,7 @@ for seed in range(n_seeds):
                     cl_vector_dict=test_cl_vector_dict,
                     cl_failure_dict=test_cl_failure_dict,
                     das_object=das_object,
-                    do_rotate=True,
+                    do_rotate=do_rotate,
                 ).item()/len(test_dataloader)
         eval_metrics = compute_metrics(eval_preds, eval_labels)
         test_accuracy = eval_metrics["accuracy"]
@@ -507,6 +547,13 @@ for seed in range(n_seeds):
         intrv_states = torch.vstack(intrv_hstates)
         natty_states = torch.vstack(cl_hstates)
     
+        if save_actvs_dir is not None and not debug:
+            actvs_name = f"{save_actvs_dir}/cl_eps_{cl_eps}_seed_{seed}_dorot{do_rotate}_{save_stamp}.pt"
+            torch.save({
+                "intrv_states": intrv_states,
+                "natty_states": natty_states,
+            }, actvs_name)
+            print(f"Saved actvs to {actvs_name}")
     
         n_samples = n_divergence_samples
         d = natty_states.shape[-1]
@@ -517,65 +564,68 @@ for seed in range(n_seeds):
         print("Intrv:", intrv_states.shape)
         emd_df_dict = {
             "sample_id": [],
-            "raw_mse": [],
+            "mse": [],
             "emd": [],
             "base_emd": [],
             "base_cost_cos": [],
             "cost_cos": [],
             "base_cost_mse": [],
             "cost_mse": [],
+            "local_pca": [],
+            "lle_recon": [],
+            "kde": [],
+            "svm": [],
         }
+        if debug: n_samples = 2
         for samp_id in range(n_samples):
             with torch.no_grad():
-                diffs = visualize_states(
-                    natty_states.cpu().detach(),
-                    intrv_states.cpu().detach(),
-                    xdim=0,
-                    ydim=1,
-                    save_name=f"figs/cl_das_divergence_{cl_eps}_{samp_id}.png" if not debug else None,
-                    expl_var_threshold=0,
-                    emd_sample_type="permute",
-                    emd_sample_size=len(natty_states)//2,
-                    normalize_emd=True,
-                    visualize=False,
-                    pca_batch_size=500,
-                    use_numpy=use_numpy,
-                )
+                if samp_id == 0:
+                    diffs = visualize_states(
+                        natty_states.cpu().detach().float(),
+                        intrv_states.cpu().detach().float(),
+                        xdim=0,
+                        ydim=1,
+                        save_name=f"figs/cl_das_divergence_{cl_eps}_seed_{seed}_dorot{do_rotate}_{save_stamp}.png" if not debug and samp_id == 0 else None,
+                        expl_var_threshold=0,
+                        emd_sample_type="permute",
+                        emd_sample_size=5000,
+                        normalize_emd=True,
+                        visualize=False,
+                        pca_batch_size=500,
+                        use_numpy=use_numpy,
+                    )
+                else:
+                    natty_vecs = natty_states.cpu().detach().float()
+                    intrv_vecs = intrv_states.cpu().detach().float()
+                    diffs = collect_divergences(
+                        natty_vecs, intrv_vecs, sample_size=5000)
             
-            mse = float(diffs["mse"])
-            emd = float(diffs["emd"])
-            base_emd = float(diffs["base_emd"])
-            base_cost_cos = float(diffs["base_cost_cos"])
-            cost_cos = float(diffs["cost_cos"])
-            base_cost_mse = float(diffs["base_cost_mse"])
-            cost_mse = float(diffs["cost_mse"])
-
             emd_df_dict["sample_id"].append(samp_id)
-            emd_df_dict["emd"].append(emd)
-            emd_df_dict["raw_mse"].append(mse)
-            emd_df_dict["base_emd"].append(base_emd)
-            emd_df_dict["base_cost_cos"].append(base_cost_cos)
-            emd_df_dict["cost_cos"].append(cost_cos)
-            emd_df_dict["base_cost_mse"].append(base_cost_mse)
-            emd_df_dict["cost_mse"].append(cost_mse)
+            for k,v in diffs.items():
+                if k not in emd_df_dict:
+                    emd_df_dict[k] = []
+                emd_df_dict[k].append(float(v))
+
         emd_df = pd.DataFrame(emd_df_dict)
-        cols = [
-            "base_emd","emd","raw_mse","base_cost_cos", "cost_cos",
-            "base_cost_mse", "cost_mse",
-        ]
+        print(emd_df)
+        cols = list(diffs.keys())
         means = dict(emd_df[cols].mean())
+        errors = dict(emd_df[cols].sem())
         print("Divergence means:")
         for col,val in means.items():
             if col not in metrics_dict:
                 metrics_dict[col] = []
+            if col+"_sem" not in metrics_dict:
+                metrics_dict[col+"_sem"] = []
             metrics_dict[col].append(float(val))
-            print("\t", col, ":", float(val))
+            metrics_dict[col+"_sem"].append(float(errors[col]))
+            print("\t", col, ":", float(val), "±", float(errors[col]), "sem")
         metrics_dict["method"].append("das")
         if not os.path.exists("csvs/"):
             os.mkdir("csvs/")
         emd_df = pd.DataFrame(metrics_dict)
         if not debug:
-            csv_name = f"csvs/cl_das_divergences.csv"
+            csv_name = f"csvs/cl_das_divergences_dorot{do_rotate}_{save_stamp}.csv"
             emd_df.to_csv(csv_name, header=True, index=False)
             print(f"Saved divergences to {csv_name}")
         print()
