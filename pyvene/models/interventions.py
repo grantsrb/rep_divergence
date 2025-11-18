@@ -325,6 +325,7 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
         self.intervention_population = torch.nn.Parameter(
             torch.arange(0, self.embed_dim), requires_grad=False
         )
+        self.comms_dict = dict()
 
     def get_boundary_parameters(self):
         return self.intervention_boundaries
@@ -339,12 +340,8 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
         self.intervention_boundaries = torch.nn.Parameter(
             torch.tensor([intervention_boundaries]), requires_grad=True
         )
-        
-    def forward(self, base, source, subspaces=None):
-        batch_size = base.shape[0]
-        rotated_base = self.rotate_layer(base)
-        rotated_source = self.rotate_layer(source)
-        # get boundary
+    
+    def get_boundary_mask(self, batch_size, device, dtype):
         intervention_boundaries = torch.clamp(self.intervention_boundaries, 1e-3, 1)
         boundary_mask = sigmoid_boundary(
             self.intervention_population.repeat(batch_size, 1),
@@ -353,15 +350,29 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
             self.temperature,
         )
         boundary_mask = (
-            torch.ones(batch_size, device=base.device).unsqueeze(dim=-1) * boundary_mask
+            torch.ones(batch_size, device=device).unsqueeze(dim=-1) * boundary_mask
         )
-        boundary_mask = boundary_mask.to(rotated_base.dtype)
+        boundary_mask = boundary_mask.to(dtype)
+        return boundary_mask
+        
+    def forward(self, base, source, subspaces=None):
+        batch_size = base.shape[0]
+        self.comms_dict["source_vectors"] = source.cpu()
+        self.comms_dict["base_vectors"] = base.cpu()
+        rotated_base = self.rotate_layer(base)
+        rotated_source = self.rotate_layer(source)
+        # get boundary
+        boundary_mask = self.get_boundary_mask(
+            batch_size, base.device, dtype=rotated_base.dtype
+        )
         # interchange
         rotated_output = (
             1.0 - boundary_mask
         ) * rotated_base + boundary_mask * rotated_source
         # inverse output
+        self.comms_dict["rotated_intrv"] = rotated_output.cpu()
         output = torch.matmul(rotated_output, self.rotate_layer.weight.T)
+        self.comms_dict["intrv_vectors"] = output.cpu()
         return output.to(base.dtype)
 
     def __str__(self):
