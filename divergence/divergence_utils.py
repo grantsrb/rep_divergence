@@ -1,12 +1,14 @@
 import math
+import os
 import torch
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from geomloss import SamplesLoss
-from fca.projections import perform_eigen_pca
-from sklearn.utils.extmath import randomized_svd
+#from fca.projections import perform_eigen_pca
+from scipy.optimize import linear_sum_assignment
+#import scipy.optimize.linear_sum_assignment as linear_sum_assignment
 
 def device_fn(device):
     if device==-1:
@@ -128,7 +130,10 @@ def sample_emd(X,Y, sample_type="identity", normalize=False, sample_size=None):
         Y = (Y-Y.mean(0))/(Y.std(0)+1e-5)
     X = X[:sample_size]
     Y = Y[:sample_size]
-    return compute_emd(X, Y).item()
+    emd = compute_emd(X, Y).item()
+    if normalize:
+        emd = emd/(X.shape[-1]**0.5)
+    return emd
 
 def interleave_scatter(
     natty_df,
@@ -187,7 +192,12 @@ def interleave_scatter(
         intrv_patch = mpatches.Patch(color=color, label="Intervened")
         ax.legend(handles=[native_patch, intrv_patch], fontsize=legendsize, loc="upper right", bbox_to_anchor=(1.75,1))
     if save_name:
-        plt.savefig(save_name, dpi=600, bbox_inches="tight")
+        try:
+            plt.savefig(save_name, dpi=600, bbox_inches="tight")
+        except:
+            print(f"Error saving figure to {save_name}")
+            os.makedirs(os.path.dirname(save_name), exist_ok=True)
+            plt.savefig(save_name, dpi=600, bbox_inches="tight")
     
     plt.show()
 
@@ -206,6 +216,8 @@ def visualize_states(
     visualize=True,
     verbose=True,
     incl_legend=False,
+    pca_batch_size=1000,
+    use_numpy=False,
 ):
 
     if sample_size:
@@ -213,24 +225,28 @@ def visualize_states(
         natty_states = natty_states[samp]
         intrv_states = intrv_states[samp]
         
-    X = np.concatenate([
-        natty_states.clone().detach().cpu().float().numpy(),
-        intrv_states.clone().detach().cpu().float().numpy(),
-    ], axis=0)
+    if use_numpy:
+        X = np.concatenate([
+            natty_states.clone().detach().cpu().float().numpy(),
+            intrv_states.clone().detach().cpu().float().numpy(),
+        ], axis=0)
+    else:
+        X = torch.cat([natty_states, intrv_states], dim=0)
     train_X = X
     
     ret = perform_eigen_pca(
-        X=torch.tensor(train_X),
+        #X=torch.tensor(train_X),
+        X=train_X,
         scale=True,
         center=True,
         transform_data=True,
-        batch_size=2000,
+        batch_size=pca_batch_size,
     )
     vecs = ret["transformed_X"]
     
-    natty_vecs = torch.tensor(vecs[:len(natty_states)])
-    intrv_vecs = torch.tensor(vecs[len(natty_states):])
-    expl_vars = torch.tensor(ret["proportion_expl_var"]).float()
+    natty_vecs = torch.tensor(vecs[:len(natty_states)]).cpu()
+    intrv_vecs = torch.tensor(vecs[len(natty_states):]).cpu()
+    expl_vars = torch.tensor(ret["proportion_expl_var"]).float().cpu()
     
     if xdim is None or ydim is None:
         diffs = ((natty_vecs-intrv_vecs)**2).mean(0)
@@ -274,13 +290,57 @@ def visualize_states(
         )
     
     mse = ((natty_vecs-intrv_vecs)**2).mean().item()
-    emd = sample_emd(natty_vecs, intrv_vecs, sample_type=emd_sample_type, normalize=normalize_emd, sample_size=emd_sample_size)
-    base_emd = sample_emd(natty_vecs, natty_vecs, sample_type=emd_sample_type, normalize=normalize_emd, sample_size=emd_sample_size)
+    perm = torch.randperm(len(natty_vecs)).long()
+    nat = natty_vecs[perm[:len(natty_vecs)//2]]
+    perm = torch.randperm(len(intrv_vecs)).long()
+    intrv = intrv_vecs[perm[:len(natty_vecs)//2]]
+    emd = sample_emd(
+        nat,
+        intrv,
+        sample_type=emd_sample_type,
+        normalize=normalize_emd,
+        sample_size=emd_sample_size
+    )
+    perm = torch.randperm(len(natty_vecs)).long()
+    nat = natty_vecs[perm[:len(natty_vecs)//2]]
+    perm = torch.randperm(len(natty_vecs)).long()
+    intrv = natty_vecs[perm[:len(natty_vecs)//2]]
+    base_emd = sample_emd(
+        nat,
+        intrv,
+        sample_type=emd_sample_type,
+        normalize=normalize_emd,
+        sample_size=emd_sample_size
+    )
+
+    half = len(natty_vecs)//2
+    perm = torch.randperm(len(natty_vecs)).long()
+    intrv = intrv_vecs[perm[:half]].float()
+    natty = natty_vecs[perm[half:]].float()
+    
+    cost_mtx = 1-get_cor_mtx(intrv.T, natty.T, zscore=True, to_numpy=True) # half x half
+    _, min_cost_cos = optimal_pairs(cost_mtx)
+    
+    cost_mtx = get_mse_mtx(intrv, natty, to_numpy=True) # half x half
+    _, min_cost_mse = optimal_pairs(cost_mtx)
+    
+    intrv = natty_vecs[perm[:half]].float()
+    natty = natty_vecs[perm[half:]].float()
+    
+    cost_mtx = 1-get_cor_mtx(intrv.T, natty.T, zscore=True, to_numpy=True) # half x half
+    _, base_min_cost_cos = optimal_pairs(cost_mtx)
+    
+    cost_mtx = get_mse_mtx(intrv, natty, to_numpy=True) # half x half
+    _, base_min_cost_mse = optimal_pairs(cost_mtx)
     
     return {
         "mse": round(mse, sig_figs),
         "emd": round(emd, sig_figs),
         "base_emd": round(base_emd, sig_figs),
+        "base_cost_cos": base_min_cost_cos,
+        "cost_cos": min_cost_cos,
+        "base_cost_mse": base_min_cost_mse,
+        "cost_mse": min_cost_mse,
     }
     
 
@@ -406,8 +466,8 @@ def get_cor_mtx(X, Y, batch_size=500, to_numpy=False, zscore=True, device=None):
     """
     Creates a correlation matrix for X and Y using the GPU
 
-    X: torch tensor or ndarray (T, C) or (T, C, H, W)
-    Y: torch tensor or ndarray (T, K) or (T, K, H1, W1)
+    X: torch tensor or ndarray (B, C) or (B, C, H, W)
+    Y: torch tensor or ndarray (B, K) or (B, K, H1, W1)
     batch_size: int
         batches the calculation if this is not None
     to_numpy: bool
@@ -470,6 +530,37 @@ def get_cor_mtx(X, Y, batch_size=500, to_numpy=False, zscore=True, device=None):
     if to_numpy:
         return cor_mtx.numpy()
     return cor_mtx
+
+def get_mse_mtx(X,Y, to_numpy=False):
+    """
+    Args:
+        X: torch tensor (B,D)
+        Y: torch tensor (N,D)
+    
+    Returns
+        M: torch tensor (B,N)
+    """
+    M = []
+    for samp in range(len(X)):
+        M.append(((Y - X[samp])**2).mean(-1))
+    if type(X)==np.ndarray:
+        M = np.vstack(M)
+    else:
+        M = torch.vstack(M)
+    if to_numpy:
+        M = M.cpu().data.numpy()
+    return M
+
+def optimal_pairs(cost: np.ndarray):
+    # cost: (m, m) matrix of pairwise distances
+    row_ind, col_ind = linear_sum_assignment(cost)  # Hungarian under the hood
+    total_cost = cost[row_ind, col_ind].sum()
+    pairs = list(zip(row_ind.tolist(), col_ind.tolist()))
+    return pairs, float(total_cost)
+
+def sample_without_replacement(mtx, n_samples):
+    perm = torch.randperm(len(mtx)).long()
+    return mtx[perm[:n_samples]]
 
 def perform_pca(
         X,
@@ -547,7 +638,7 @@ def perform_pca(
     elif type(X)==np.ndarray:
         if randomized:
             svd_kwargs["n_components"] = n_components
-            svd = randomized_svd
+            svd = np.linalg.svd_lowrank
         else:
             svd_kwargs["n_components"] = n_components
             svd_kwargs["compute_uv"] = True
@@ -598,6 +689,7 @@ def perform_eigen_pca(
         center=True,
         transform_data=False,
         batch_size=None,
+        as_numpy=False,
         verbose=True,
 ):
     """
@@ -642,23 +734,27 @@ def perform_eigen_pca(
     # Center the data by subtracting the mean along each feature (column)
     means = 0
     if center:
-        means = X.mean(dim=0, keepdim=True)
+        means = X.mean(0)
         X = X - means
     stds = 1
     if scale:
         stds = (X.std(0)+1e-6)
         X = X/stds
     
-    cov = get_cor_mtx(
+    cov = get_cor_mtx( # features x features shape (N,N)
         X,X,
         zscore=False,
-        batch_size=batch_size)
+        batch_size=batch_size
+    )
     ## Use eigendecomposition of the covariance matrix for efficiency
     ## Cov = (1 / (M - 1)) * X^T X
     #cov = X.T @ X / (X.shape[0] - 1)  # shape (N, N)
 
     # Compute eigenvalues and eigenvectors
     eigvals, eigvecs = eigen_fn(cov)  # eigvals in ascending order
+    if type(eigvals)==np.ndarray:
+        eigvals = torch.tensor(eigvals)
+        eigvecs = torch.tensor(eigvecs)
 
     # Select top n_components in descending order
     eigvals = eigvals[-n_components:].flip(0)
@@ -672,13 +768,18 @@ def perform_eigen_pca(
         "components": components,
         "explained_variance": explained_variance,
         "proportion_expl_var": proportion_expl_var,
-        "means": means,
-        "stds": stds,
+        "means": torch.tensor(means),
+        "stds": torch.tensor(stds),
     }
     if transform_data:
         # Project the data onto the principal components
         # Note: components.T has shape (features, n_components)
-        ret_dict["transformed_X"] = X @ components.T
+        if type(X)==np.ndarray:
+            X = torch.tensor(X)
+        ret_dict["transformed_X"] = X @ components.T.float()
+    
+    if as_numpy:
+        ret_dict = {k: v.cpu().detach().numpy() for k, v in ret_dict.items()}
 
     return ret_dict
 
