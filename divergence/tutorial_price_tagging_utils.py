@@ -192,7 +192,13 @@ def lower_bound_alignment_example_sampler(
         ]
     elif ctf_label_str == "No":
         ctf_label = tokenizer.convert_tokens_to_ids("No")
-        base_source_regions = [[1, 1], [2, 1], [3, 1], [3, 2], [3, 3]]
+        base_source_regions = [
+            [1, 1],
+            [2, 1],
+            [3, 1],
+            [3, 2],
+            [3, 3]
+        ]
     base_source_region = random.choice(base_source_regions)
     base_region = base_source_region[0]
     source_region = base_source_region[1]
@@ -228,8 +234,22 @@ def bound_alignment_sampler(
     all_source_input_ids = []
     all_ctf_output_ids = []  # this one does not have input ids, etc..
     all_intervention_ids = []
+    all_cl_input_ids = []
 
-    for _ in range(max_n_training_examples):
+    #meta_dict = {
+    #    "base_lower_bound": [],
+    #    "base_upper_bound": [],
+    #    "source_lower_bound": [],
+    #    "source_upper_bound": [],
+    #    "base_amount": [],
+    #    "source_amount": [],
+    #    "ctf_label": [],
+    #    "ctf_label_str": [],
+    #    "bound_functor": [],
+    #    "sample_idx": [],
+    #}
+
+    for sample_idx in range(max_n_training_examples):
         bound_functor = random.choice(bound_functors)
         (
             base_lower_bound_sample,
@@ -254,9 +274,6 @@ def bound_alignment_sampler(
         source_lower_bound_str = "%.2f" % source_lower_bound_sample
         source_upper_bound_str = "%.2f" % source_upper_bound_sample
 
-        # print(f"base: [{base_lower_bound_str}, {base_upper_bound_str}], {base_amount_str}")
-        # print(f"source: [{source_lower_bound_str}, {source_upper_bound_str}], {source_amount_str}")
-        # print(f"ctf label: {ctf_label_str}")
 
         base_instruction = f"Please say yes only if it costs between {base_lower_bound_str} and {base_upper_bound_str} dollars, otherwise no."
         source_instruction = f"Please say yes only if it costs between {source_lower_bound_str} and {source_upper_bound_str} dollars, otherwise no."
@@ -269,33 +286,93 @@ def bound_alignment_sampler(
             source_instruction,
             source_amount_str,
         )
+        
+        if "lower_bound" in bound_functor.__name__:
+            cl_instruction = f"Please say yes only if it costs between {source_lower_bound_str} and {base_upper_bound_str} dollars, otherwise no."
+            cl_alpaca_prompt = alpaca_prompt_template % (
+                cl_instruction,
+                base_amount_str,
+            )
+        elif "upper_bound" in bound_functor.__name__:
+            cl_instruction = f"Please say yes only if it costs between {base_lower_bound_str} and {source_upper_bound_str} dollars, otherwise no."
+            cl_alpaca_prompt = alpaca_prompt_template % (
+                cl_instruction,
+                base_amount_str,
+            )
+        else:
+            cl_instruction = f"Please say yes only if it costs between {base_lower_bound_str} and {base_upper_bound_str} dollars, otherwise no."
+            cl_alpaca_prompt = alpaca_prompt_template % (
+                cl_instruction,
+                source_amount_str,
+            )
+
 
         base_input_ids = tokenizer(base_alpaca_prompt, return_tensors="pt").input_ids[0]
         source_input_ids = tokenizer(
             source_alpaca_prompt, return_tensors="pt"
         ).input_ids[0]
+        cl_input_ids = tokenizer(cl_alpaca_prompt, return_tensors="pt").input_ids[0]
         base_input_ids = base_input_ids.tolist()
         source_input_ids = source_input_ids.tolist()
+        cl_input_ids = cl_input_ids.tolist()
         ctf_output_ids = (torch.ones(len(base_input_ids)) * -100).long().tolist()
         ctf_output_ids[-1] = ctf_label
         intervention_id = 0 if bound_functor == bound_functors[0] else 1
 
         all_base_input_ids += [base_input_ids]
         all_source_input_ids += [source_input_ids]
+        all_cl_input_ids += [cl_input_ids]
 
         all_ctf_output_ids += [ctf_output_ids]
         all_intervention_ids += [intervention_id]
 
         assert len(base_input_ids) == 82
         assert len(source_input_ids) == 82
-
+        assert len(cl_input_ids) == 82
     return (
         all_base_input_ids,
         all_source_input_ids,
         all_ctf_output_ids,
         all_intervention_ids,
+        all_cl_input_ids,
     )
 
+def get_cl_bools(meta_df, intrv_column_name, cl_column_name, dist_tolerance=0.05):
+    """
+    Returns an ndarray of boolean arrays, one for each sample. Each boolean
+    array indicates which samples are within the distance tolerance of the source
+    sample for the given column.
+
+    Args:
+        meta_df: pandas DataFrame containing the metadata
+        cl_column_name: name of the column to use as the source
+        dist_tolerance: distance tolerance in dollars
+
+    Returns:
+        ndarray of boolean arrays (num_samples, num_samples)
+
+    Example:
+        >>> meta_df = pd.DataFrame({
+        ...     'source_amount': [1.00, 2.00, 3.00, 4.00, 5.00],
+        ...     'source_lower_bound': [0.99, 1.99, 2.99, 3.99, 4.99],
+        ...     'source_upper_bound': [1.01, 2.01, 3.01, 4.01, 5.01],
+        ... })
+        >>> get_cl_bools(meta_df, 'source_amount', 0.01)
+        array([[ True,  True,  True,  True,  True],
+               [ True,  True,  True,  True,  True],
+               [ True,  True,  True,  True,  True],
+    """
+    cl_bools = []
+    for sample_idx in range(len(meta_df)):
+        row = meta_df.iloc[sample_idx]
+        abs_diff = np.abs(float(row[intrv_column_name]) - meta_df[cl_column_name].astype(float))
+        matches = abs_diff <= dist_tolerance
+        if matches.sum() < 2:
+            matches[sample_idx] = False
+            abs_diff[sample_idx] = float('inf')
+            matches[np.argmin(abs_diff)] = True
+        cl_bools.append(matches)
+    return np.asarray(cl_bools)
 
 def midpoint_alignment_sampler(
     tokenizer,
