@@ -46,7 +46,7 @@ from divergence_utils import (
 
 set_seed(42)
 
-cl_eps_range = [100.0]
+cl_eps_range = [0, 0.5, 1.0, 4.0, 6.0, 10.0]
 do_rotate = False # Determine whether to rotate the intervention vectors
     # and applying the boundary mask before calculating the loss with the CL vectors.
     # If False, the intervention vectors are not rotated and the boundary mask is
@@ -55,9 +55,9 @@ n_seeds = 3 # will repeat the whole experiment this many times
 train_epochs = 3
 train_batch_size = 32
 cl_collection_batch_size = 128
-eval_batch_size = 128
+eval_batch_size = 64
 train_gradient_accumulation_steps = 4
-n_divergence_samples = 10
+n_divergence_samples = 5
 use_numpy = False
 debug = False
 save_actvs_dir = "/data2/grantsrb/rep_divergence/cl_boundless_actvs/"
@@ -229,11 +229,9 @@ test_dataloader = DataLoader(
 combination_type = "full_match" 
 cl_keys = ["full_match"]
 train_cl_vector_dict ={cl_keys[0]: train_cl_vectors}
-eval_cl_vector_dict = {cl_keys[0]: eval_cl_vectors}
 test_cl_vector_dict = {cl_keys[0]: test_cl_vectors}
 
 train_cl_failure_dict ={cl_keys[0]: torch.zeros(n_train).bool()}
-eval_cl_failure_dict = {cl_keys[0]: torch.zeros(n_eval).bool()}
 test_cl_failure_dict = {cl_keys[0]: torch.zeros(n_test).bool()}
 
 
@@ -351,6 +349,7 @@ metrics_dict = {
 
 for seed in range(n_seeds):
     seed = seed + 12345
+    torch.cuda.empty_cache()
 
     for cl_eps in cl_eps_range:
         print(f"Running CL epsilon: {cl_eps} - Seed: {seed}")
@@ -539,6 +538,8 @@ for seed in range(n_seeds):
         print("Test Acc:", test_accuracy)
         print("\tActn Loss:", test_actn_loss)
         print("\tCL Loss:", test_cl_loss)
+        mask = das_object.get_boundary_mask(1, device, torch.float32)
+        print("Mask:", mask.shape, "- Sum:", mask.sum())
 
         metrics_dict["test_accuracy"].append(test_accuracy)
         metrics_dict["test_actn_loss"].append(test_actn_loss)
@@ -556,7 +557,6 @@ for seed in range(n_seeds):
             print(f"Saved actvs to {actvs_name}")
     
         n_samples = n_divergence_samples
-        d = natty_states.shape[-1]
     
         print()
         print("Computing divergences for CL epsilon:", cl_eps)
@@ -580,25 +580,21 @@ for seed in range(n_seeds):
         for samp_id in range(n_samples):
             with torch.no_grad():
                 if samp_id == 0:
-                    diffs = visualize_states(
+                    visualize_states(
                         natty_states.cpu().detach().float(),
                         intrv_states.cpu().detach().float(),
                         xdim=0,
                         ydim=1,
                         save_name=f"figs/cl_das_divergence_{cl_eps}_seed_{seed}_dorot{do_rotate}_{save_stamp}.png" if not debug and samp_id == 0 else None,
+                        visualize=True,
                         expl_var_threshold=0,
-                        emd_sample_type="permute",
-                        emd_sample_size=5000,
-                        normalize_emd=True,
-                        visualize=False,
                         pca_batch_size=500,
                         use_numpy=use_numpy,
                     )
-                else:
-                    natty_vecs = natty_states.cpu().detach().float()
-                    intrv_vecs = intrv_states.cpu().detach().float()
-                    diffs = collect_divergences(
-                        natty_vecs, intrv_vecs, sample_size=5000)
+                natty_vecs = natty_states.cpu().detach().float()
+                intrv_vecs = intrv_states.cpu().detach().float()
+                diffs = collect_divergences(
+                    natty_vecs, intrv_vecs, sample_size=5000)
             
             emd_df_dict["sample_id"].append(samp_id)
             for k,v in diffs.items():

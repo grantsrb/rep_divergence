@@ -215,10 +215,6 @@ def visualize_states(
     save_name=None,
     expl_var_threshold=0,
     sample_size=None,
-    emd_sample_type="permute",
-    sig_figs = 5,
-    emd_sample_size=5000,
-    normalize_emd=True,
     visualize=True,
     verbose=True,
     incl_legend=False,
@@ -294,9 +290,6 @@ def visualize_states(
             incl_legend=incl_legend,
             save_name=save_name,
         )
-    
-    return collect_divergences(natty_vecs, intrv_vecs)
-
 
 def collect_divergences(
     natty_vecs,
