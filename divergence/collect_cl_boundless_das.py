@@ -44,13 +44,19 @@ from divergence_utils import (
 )
 
 
-set_seed(42)
+seed = 42
+set_seed(seed)
 
-cl_eps_range = [0, 0.5, 1.0, 4.0, 6.0, 10.0]
+cl_eps_range = [
+    0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 16.0, 32.0, 64.0
+]
 do_rotate = False # Determine whether to rotate the intervention vectors
     # and applying the boundary mask before calculating the loss with the CL vectors.
     # If False, the intervention vectors are not rotated and the boundary mask is
     # not applied before calculating the loss with the CL vectors.
+intrv_type = "boundless" # Determine whether to use the Boundless DAS intervention or the Hacky DAS intervention.
+mask_dims = 3 # Determine the dimensions of the intervention mask. Only applies
+    # if using the Hacky DAS intervention.
 n_seeds = 3 # will repeat the whole experiment this many times
 train_epochs = 3
 train_batch_size = 32
@@ -82,10 +88,7 @@ if save_actvs_dir is not None and not debug:
 ###################
 # data loaders
 ###################
-raw_data = bound_alignment_sampler(
-    tokenizer, 10000, [lower_bound_alignment_example_sampler]
-)
-
+tot_samples = 10000
 n_train = 8000
 n_eval = 1000
 n_test = 1000
@@ -93,6 +96,12 @@ if debug:
     n_train = 100
     n_eval = 100
     n_test = 100
+
+raw_data = bound_alignment_sampler(
+    tokenizer,
+    tot_samples,
+    [lower_bound_alignment_example_sampler]
+)
 
 raw_train = (
     raw_data[0][:n_train],
@@ -120,7 +129,7 @@ train_dataset = Dataset.from_dict(
         "input_ids": raw_train[0],
         "source_input_ids": raw_train[1],
         "labels": raw_train[2],
-        "intervention_ids": raw_train[3],  # we will not use this field
+        "subspace_ids": raw_train[3],
         "cl_input_ids": raw_train[4],
         "indices": [i for i in range(len(raw_train[0]))],
     }
@@ -135,7 +144,7 @@ eval_dataset = Dataset.from_dict(
         "input_ids": raw_eval[0],
         "source_input_ids": raw_eval[1],
         "labels": raw_eval[2],
-        "intervention_ids": raw_eval[3],  # we will not use this field
+        "subspace_ids": raw_eval[3],
         "cl_input_ids": raw_eval[4],
         "indices": [i for i in range(len(raw_eval[0]))],
     }
@@ -150,7 +159,7 @@ test_dataset = Dataset.from_dict(
         "input_ids": raw_test[0],
         "source_input_ids": raw_test[1],
         "labels": raw_test[2],
-        "intervention_ids": raw_test[3],  # we will not use this field
+        "subspace_ids": raw_test[3],
         "cl_input_ids": raw_test[4],
         "indices": [i for i in range(len(raw_test[0]))],
     }
@@ -164,7 +173,16 @@ test_dataloader = DataLoader(
 
 # ### Boundless DAS on Position-aligned Tokens
 
-def simple_boundless_das_position_config(model_type, intervention_type, layer):
+def simple_boundless_das_position_config(
+        model_type, intervention_type, layer, intrv_type="boundless",
+):
+    if intrv_type == "boundless":
+        class_type = BoundlessRotatedSpaceIntervention
+    elif intrv_type == "hacky":
+        raise NotImplementedError("Hacky DAS is not implemented yet.")
+        #class_type = HackyRotatedSpaceIntervention
+    else:
+        raise ValueError(f"Invalid intervention type: {intrv_type}")
     config = IntervenableConfig(
         model_type=model_type,
         representations=[
@@ -173,14 +191,14 @@ def simple_boundless_das_position_config(model_type, intervention_type, layer):
                 intervention_type,  # intervention type
             ),
         ],
-        intervention_types=BoundlessRotatedSpaceIntervention,
+        intervention_types=class_type,
     )
     return config
 
 
 layer_num = 15
 config = simple_boundless_das_position_config(
-    type(llama), "block_output", layer_num
+    type(llama), "block_output", layer_num, intrv_type=intrv_type
 )
 intervenable = IntervenableModel(config, llama)
 intervenable.set_device("cuda")
@@ -192,6 +210,8 @@ intervenable.disable_model_gradients()
 # and "intrv_vectors" dict keys respectively.
 key = list(intervenable.interventions.keys())[0] # Get name of the intervention
 das_object = intervenable.interventions[key][0] # Get the intervention object
+if intrv_type == "hacky":
+    das_object.set_masks(n_masks=3, mask_dims=mask_dims)
 comms_dict = das_object.comms_dict # Get the comms dictionary
 
 
@@ -215,8 +235,6 @@ def collect_source_vectors(intervenable, dataloader, source_key="cl_input_ids"):
 # collecting the source vectors from the Boundless DAS intervention module.
 print("Collecting train set cl vectors")
 train_cl_vectors = collect_source_vectors(intervenable, train_dataloader).cpu()
-#print("Collecting eval set cl vectors")
-#eval_cl_vectors = collect_source_vectors(intervenable, eval_dataloader).cpu()
 print("Collecting test set cl vectors")
 test_cl_vectors = collect_source_vectors(intervenable, test_dataloader).cpu()
 
@@ -228,10 +246,10 @@ test_dataloader = DataLoader(
 
 combination_type = "full_match" 
 cl_keys = ["full_match"]
-train_cl_vector_dict ={cl_keys[0]: train_cl_vectors}
+train_cl_vector_dict = {cl_keys[0]: train_cl_vectors}
 test_cl_vector_dict = {cl_keys[0]: test_cl_vectors}
 
-train_cl_failure_dict ={cl_keys[0]: torch.zeros(n_train).bool()}
+train_cl_failure_dict = {cl_keys[0]: torch.zeros(n_train).bool()}
 test_cl_failure_dict = {cl_keys[0]: torch.zeros(n_test).bool()}
 
 
@@ -280,16 +298,18 @@ def rotated_cl_loss(
         das_object,
         intrv_vectors,
         cl_vectors,
-        mask_idx=0,
+        subspaces=None,
         loss_type="both"
 ):
     """
     Calculate the loss between the intervention vectors and the cl vectors.
     """
     mask = das_object.get_boundary_mask(
-        intrv_vectors.shape[0], intrv_vectors.device, intrv_vectors.dtype
+        batch_size=intrv_vectors.shape[0],
+        subspaces=subspaces,
+        device=intrv_vectors.device,
+        dtype=intrv_vectors.dtype
     )
-    mask = mask-mask_idx
     intrv_vectors = das_object.rotate_layer(intrv_vectors)*mask
     with torch.no_grad():
         c_vectors = das_object.rotate_layer(cl_vectors)*mask
@@ -307,6 +327,7 @@ def calculate_cl_loss(
     intrv_vectors = intrv_vectors.to(device)
     cl_loss = 0.0
     cl_idxs = inputs["indices"].long().to(device)
+    subspaces = inputs["subspace_ids"].to(device)
     for cl_key in cl_vector_dict.keys():
         cl_vectors = cl_vector_dict[cl_key].to(device)[cl_idxs]
         cl_keeps = ~cl_failure_dict[cl_key].to(device)[cl_idxs]
@@ -315,7 +336,7 @@ def calculate_cl_loss(
                 das_object,
                 intrv_vectors[cl_keeps],
                 cl_vectors[cl_keeps],
-                mask_idx=0,
+                subspaces=subspaces[cl_keeps],
                 loss_type="both"
             )
         else:
@@ -339,15 +360,9 @@ metrics_dict = {
     "train_actn_loss": [],
     "test_cl_loss": [],
     "test_actn_loss": [],
-    "base_emd": [],
-    "emd": [],
-    "base_cost_cos": [],
-    "cost_cos": [],
-    "base_cost_mse": [],
-    "cost_mse": [],
 }
 
-for seed in range(n_seeds):
+for _ in range(n_seeds):
     seed = seed + 12345
     torch.cuda.empty_cache()
 
@@ -422,6 +437,7 @@ for seed in range(n_seeds):
                 for k, v in inputs.items():
                     if v is not None and isinstance(v, torch.Tensor):
                         inputs[k] = v.to("cuda")
+                comms_dict["subspaces"] = inputs["subspace_ids"]
                 b_s = inputs["input_ids"].shape[0]
                 _, counterfactual_outputs = intervenable(
                     {"input_ids": inputs["input_ids"]},
@@ -538,7 +554,9 @@ for seed in range(n_seeds):
         print("Test Acc:", test_accuracy)
         print("\tActn Loss:", test_actn_loss)
         print("\tCL Loss:", test_cl_loss)
-        mask = das_object.get_boundary_mask(1, device, torch.float32)
+        mask = das_object.get_boundary_mask(
+            batch_size=1, subspaces=None, device=device, dtype=torch.float32
+        )
         print("Mask:", mask.shape, "- Sum:", mask.sum())
 
         metrics_dict["test_accuracy"].append(test_accuracy)
@@ -564,17 +582,6 @@ for seed in range(n_seeds):
         print("Intrv:", intrv_states.shape)
         emd_df_dict = {
             "sample_id": [],
-            "mse": [],
-            "emd": [],
-            "base_emd": [],
-            "base_cost_cos": [],
-            "cost_cos": [],
-            "base_cost_mse": [],
-            "cost_mse": [],
-            "local_pca": [],
-            "lle_recon": [],
-            "kde": [],
-            "svm": [],
         }
         if debug: n_samples = 2
         for samp_id in range(n_samples):

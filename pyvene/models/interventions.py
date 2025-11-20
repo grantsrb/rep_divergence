@@ -341,7 +341,13 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
             torch.tensor([intervention_boundaries]), requires_grad=True
         )
     
-    def get_boundary_mask(self, batch_size, device, dtype):
+    def get_boundary_mask(self, batch_size=1, subspaces=None, device=None, dtype=torch.float32):
+        if device is None:
+            device = next(self.parameters()).device
+        if subspaces is None:
+            subspaces = torch.zeros(batch_size, dtype=torch.long)
+        if type(subspaces)==int:
+            subspaces = torch.tensor([subspaces], dtype=torch.long)
         intervention_boundaries = torch.clamp(self.intervention_boundaries, 1e-3, 1)
         boundary_mask = sigmoid_boundary(
             self.intervention_population.repeat(batch_size, 1),
@@ -352,7 +358,7 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
         boundary_mask = (
             torch.ones(batch_size, device=device).unsqueeze(dim=-1) * boundary_mask
         )
-        boundary_mask = boundary_mask.to(dtype)
+        boundary_mask = boundary_mask.to(dtype) - subspaces[..., None].to(device).to(dtype)
         return boundary_mask
         
     def forward(self, base, source, subspaces=None):
@@ -363,7 +369,7 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
         rotated_source = self.rotate_layer(source)
         # get boundary
         boundary_mask = self.get_boundary_mask(
-            batch_size, base.device, dtype=rotated_base.dtype
+            batch_size, subspaces=None, device=base.device, dtype=rotated_base.dtype
         )
         # interchange
         rotated_output = (
@@ -377,6 +383,88 @@ class BoundlessRotatedSpaceIntervention(TrainableIntervention, DistributedRepres
 
     def __str__(self):
         return f"BoundlessRotatedSpaceIntervention()"
+
+
+class HackyRotatedSpaceIntervention(TrainableIntervention, DistributedRepresentationIntervention):
+
+    """
+    Intervention in the rotated space. This is a hacky class to specify
+    subspaces without understanding the pyvene codebase.
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        rotate_layer = RotateLayer(self.embed_dim)
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer)
+        self.intervention_boundaries = torch.nn.Parameter(
+            torch.tensor([0.5]), requires_grad=True
+        )
+        self.temperature = torch.nn.Parameter(torch.tensor(50.0))
+        self.intervention_population = torch.nn.Parameter(
+            torch.arange(0, self.embed_dim), requires_grad=False
+        )
+        self.masks = None
+        self.comms_dict = dict()
+
+    def set_masks(self, n_masks, mask_dims=1):
+        """
+        Set the possible intervention masks for each possible subspace.
+
+        Args:
+            n_masks: int
+                The number of possible intervention masks.
+            mask_dims: int or list of ints
+                The dimensions of each intervention mask. If an integer is provided,
+                the same number of dimensions will be used for each mask.
+                If a list of integers is provided, the number of dimensions for
+                each subspace will be determined by the list.
+        """
+        if type(mask_dims)==int: mask_dims = [mask_dims for _ in range(n_masks)]
+        total_dims = 0
+        masks = []
+        for i in range(n_masks):
+            masks.append(torch.zeros(self.embed_dim, dtype=torch.float32))
+            masks[i][total_dims:total_dims+mask_dims[i]] = 1.0
+            total_dims += mask_dims[i]
+            if total_dims >= self.embed_dim:
+                break
+        if total_dims < self.embed_dim:
+            masks.append(torch.zeros(self.embed_dim, dtype=torch.float32))
+            masks[i][total_dims:] = 1.0
+        self.masks = self.register_buffer("masks", torch.stack(masks))
+
+    def get_boundary_mask(self, batch_size=1, subspaces=None, device=None, dtype=torch.float32):
+        if device is None:
+            device = next(self.parameters()).device
+        if subspaces is None:
+            subspaces = torch.zeros(batch_size, dtype=torch.long)
+        if type(subspaces)==int:
+            subspaces = torch.tensor([subspaces], dtype=torch.long)
+        boundary_mask = self.masks[subspaces].to(device).to(dtype)
+        return boundary_mask
+        
+    def forward(self, base, source, subspaces=None):
+        batch_size = base.shape[0]
+        self.comms_dict["source_vectors"] = source.cpu()
+        self.comms_dict["base_vectors"] = base.cpu()
+        subspaces = self.comms_dict.get("subspaces", subspaces)
+        rotated_base = self.rotate_layer(base)
+        rotated_source = self.rotate_layer(source)
+        # get boundary
+        boundary_mask = self.get_boundary_mask(
+            batch_size, subspaces, base.device, dtype=rotated_base.dtype
+        )
+        # interchange
+        rotated_output = (
+            1.0 - boundary_mask
+        ) * rotated_base + boundary_mask * rotated_source
+        # inverse output
+        self.comms_dict["rotated_intrv"] = rotated_output.cpu()
+        output = torch.matmul(rotated_output, self.rotate_layer.weight.T)
+        self.comms_dict["intrv_vectors"] = output.cpu()
+        return output.to(base.dtype)
+
+    def __str__(self):
+        return f"HackyRotatedSpaceIntervention()"
 
 
 class SigmoidMaskRotatedSpaceIntervention(TrainableIntervention, DistributedRepresentationIntervention):
