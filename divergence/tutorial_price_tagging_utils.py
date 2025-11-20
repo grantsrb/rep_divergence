@@ -168,7 +168,10 @@ def sample_with_region(region, lower_bound_sample, upper_bound_sample):
 
 
 def lower_bound_alignment_example_sampler(
-    tokenizer, amount=None, lower_bound=None, bound_width=None
+    tokenizer,
+    amount=None,
+    lower_bound=None,
+    bound_width=None,
 ):
     (
         base_lower_bound_sample,
@@ -235,19 +238,6 @@ def bound_alignment_sampler(
     all_ctf_output_ids = []  # this one does not have input ids, etc..
     all_intervention_ids = []
     all_cl_input_ids = []
-
-    #meta_dict = {
-    #    "base_lower_bound": [],
-    #    "base_upper_bound": [],
-    #    "source_lower_bound": [],
-    #    "source_upper_bound": [],
-    #    "base_amount": [],
-    #    "source_amount": [],
-    #    "ctf_label": [],
-    #    "ctf_label_str": [],
-    #    "bound_functor": [],
-    #    "sample_idx": [],
-    #}
 
     for sample_idx in range(max_n_training_examples):
         bound_functor = random.choice(bound_functors)

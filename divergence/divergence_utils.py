@@ -111,7 +111,7 @@ def filter_by_layer_and_position(natty_hstates, intrv_hstates, layer=None, pos=N
     return natty_states, intrv_states
 
 
-def sample_emd(X,Y, sample_type="identity", normalize=False, sample_size=None):
+def sample_emd(X,Y, sample_type="identity", normalize=True, sample_size=None):
     """
     X: torch tensor (B,D)
     Y: torch tensor (B,D)
@@ -246,8 +246,12 @@ def visualize_states(
     )
     vecs = ret["transformed_X"]
     
-    natty_vecs = torch.tensor(vecs[:len(natty_states)]).cpu().float()
-    intrv_vecs = torch.tensor(vecs[len(natty_states):]).cpu().float()
+    natty_vecs = vecs[:len(natty_states)]
+    intrv_vecs = vecs[len(natty_states):]
+    if type(natty_vecs)==np.ndarray:
+        natty_vecs = torch.tensor(natty_vecs).cpu().float()
+    if type(intrv_vecs)==np.ndarray:
+        intrv_vecs = torch.tensor(intrv_vecs).cpu().float()
     expl_vars = torch.tensor(ret["proportion_expl_var"]).float().cpu()
     
     if xdim is None or ydim is None:
@@ -295,6 +299,8 @@ def collect_divergences(
     natty_vecs,
     intrv_vecs,
     sample_size=5000,
+    verbose=True,
+    compute_all_divergences=False,
 ):
     if sample_size:
         samp = torch.randperm(len(natty_vecs))[:sample_size].long()
@@ -306,10 +312,19 @@ def collect_divergences(
     half = len(natty_vecs)//2
     perm = torch.randperm(len(natty_vecs)).long()
     nat = natty_vecs[perm[:half]]
+    perm = torch.randperm(len(natty_vecs)).long()
     intrv = intrv_vecs[perm[half:]]
-    div_dict = divergences(nat, intrv)
-    intrv = natty_vecs[perm[half:]]
-    div_dict2 = divergences(nat, intrv)
+    div_dict = divergences(
+        nat, intrv,
+        verbose=verbose,
+        compute_all_divergences=compute_all_divergences,
+    )
+    nat2 = natty_vecs[perm[:half]]
+    div_dict2 = divergences(
+        nat, nat2,
+        verbose=verbose,
+        compute_all_divergences=compute_all_divergences
+    )
     return {
         "mse": mse,
         **div_dict,
@@ -317,6 +332,30 @@ def collect_divergences(
     }
 
     
+def get_optimal_cos_cost(X, Y):
+    cost_mtx = 1-get_cor_mtx(X.T, Y.T, zscore=True, to_numpy=True)
+    _, cost = optimal_pairs(cost_mtx)
+    return cost
+
+def get_optimal_mse_cost(X, Y):
+    cost_mtx = get_mse_mtx(X, Y, to_numpy=True)
+    _, cost = optimal_pairs(cost_mtx)
+    return cost
+
+def get_optimal_local_pca_cost(X, Y):
+    local_pca = LocalPCADistance(X.cpu().float().numpy())
+    cost = local_pca.score(Y.cpu().float().numpy(), verbose=True).mean()
+    return cost
+
+def get_optimal_local_recon_cost(X, Y):
+    local_recon = LLEReconstructionDistance(X.cpu().float().numpy())
+    cost = local_recon.score(Y.cpu().float().numpy(), verbose=True).mean()
+    return cost
+
+def get_optimal_kde_cost(X, Y):
+    kde = KDEDensityScore(X.cpu().float().numpy(), bandwidth=0.4)
+    cost = kde.score(Y.cpu().float().numpy(), verbose=True).mean()
+    return cost
 
 def divergences(
         natty_vecs,
@@ -324,9 +363,13 @@ def divergences(
         emd_sample_type="permute",
         normalize_emd=True,
         emd_sample_size=5000,
+        verbose=True,
+        compute_all_divergences=False,
 ):
     div_dict = {}
 
+    if verbose:
+        print("Computing EMD")
     div_dict["emd"] = sample_emd(
         natty_vecs,
         intrv_vecs,
@@ -335,27 +378,26 @@ def divergences(
         sample_size=emd_sample_size
     )
 
-    cost_mtx = 1-get_cor_mtx(intrv_vecs.T, natty_vecs.T, zscore=True, to_numpy=True) # half x half
-    _, div_dict["cost_cos"] = optimal_pairs(cost_mtx)
-    
-    cost_mtx = get_mse_mtx(intrv_vecs, natty_vecs, to_numpy=True) # half x half
-    _, div_dict["cost_mse"] = optimal_pairs(cost_mtx)
+    if verbose:
+        print("Computing Cosine Cost")
+    div_dict["cost_cos"] = get_optimal_cos_cost(intrv_vecs, natty_vecs)
 
-    local_pca = LocalPCADistance(natty_vecs.cpu().float().numpy())
-    div_dict["local_pca"] = local_pca.score(
-        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
-    
-    local_recon = LLEReconstructionDistance(natty_vecs.cpu().float().numpy())
-    div_dict["lle_recon"] = local_recon.score(
-        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
+    if compute_all_divergences:
+        if verbose:
+            print("Computing MSE Cost")
+        div_dict["cost_mse"] = get_optimal_mse_cost(intrv_vecs, natty_vecs)
 
-    kde = KDEDensityScore(natty_vecs.cpu().float().numpy(), bandwidth=0.4)
-    div_dict["kde"] = kde.score(
-        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
-    
-    svm = OneClassSVMDistance(natty_vecs.cpu().float().numpy())
-    div_dict["svm"] = svm.score(
-        intrv_vecs.cpu().float().numpy(), verbose=True).mean()
+        if verbose:
+            print("Computing Local PCA Cost")
+        div_dict["local_pca"] = get_optimal_local_pca_cost(natty_vecs, intrv_vecs)
+
+        if verbose:
+            print("Computing Local Reconstruction Cost")
+        div_dict["lle_recon"] = get_optimal_local_recon_cost(natty_vecs, intrv_vecs)
+
+        if verbose:
+            print("Computing KDE Cost")
+        div_dict["kde"] = get_optimal_kde_cost(natty_vecs, intrv_vecs)
     
     return {k:float(v) for k,v in div_dict.items()}
 
@@ -555,21 +597,18 @@ def get_mse_mtx(X,Y, to_numpy=False):
     Returns
         M: torch tensor (B,N)
     """
-    M = []
-    for samp in range(len(X)):
-        M.append(((Y - X[samp])**2).mean(-1))
-    if type(X)==np.ndarray:
-        M = np.vstack(M)
-    else:
-        M = torch.vstack(M)
+    M = ((Y - X[:,None])**2).mean(-1)
     if to_numpy:
-        M = M.cpu().data.numpy()
+        try:
+            M = M.cpu().data.numpy()
+        except:
+            pass
     return M
 
 def optimal_pairs(cost: np.ndarray):
     # cost: (m, m) matrix of pairwise distances
     row_ind, col_ind = linear_sum_assignment(cost)  # Hungarian under the hood
-    total_cost = cost[row_ind, col_ind].sum()
+    total_cost = cost[row_ind, col_ind].sum()/(max(len(row_ind), len(col_ind)))
     pairs = list(zip(row_ind.tolist(), col_ind.tolist()))
     return pairs, float(total_cost)
 
