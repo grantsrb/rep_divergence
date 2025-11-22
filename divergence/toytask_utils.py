@@ -306,6 +306,7 @@ def make_tasks(task_division="distinct_y", varbs=None):
     return task1_bools, task2_bools
 
 all_divisions = [
+    "original",
     "shared_y",
     "shared_y_overlap",
     "tetris_L",
