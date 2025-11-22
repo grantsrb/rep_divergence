@@ -342,6 +342,14 @@ def get_optimal_mse_cost(X, Y):
     _, cost = optimal_pairs(cost_mtx)
     return cost
 
+def get_nearest_neighbor_cost_cos(X, Y):
+    cost_mtx = 1-get_cor_mtx(X.T, Y.T, zscore=True, to_numpy=True)
+    return cost_mtx.min(1).mean()
+
+def get_nearest_neighbor_cost_mse(X, Y):
+    cost_mtx = get_mse_mtx(X, Y, to_numpy=True)
+    return cost_mtx.min(1).mean()
+
 def get_optimal_local_pca_cost(X, Y):
     local_pca = LocalPCADistance(X.cpu().float().numpy())
     cost = local_pca.score(Y.cpu().float().numpy(), verbose=True).mean()
@@ -382,10 +390,20 @@ def divergences(
         print("Computing Cosine Cost")
     div_dict["cost_cos"] = get_optimal_cos_cost(intrv_vecs, natty_vecs)
 
+    if verbose:
+        print("Computing Nearest Neighbor Cost Cosine")
+    div_dict["nn_cos"] = get_nearest_neighbor_cost_cos(intrv_vecs, natty_vecs)
+
+    if verbose:
+        print("Computing MSE Cost")
+    div_dict["cost_mse"] = get_optimal_mse_cost(intrv_vecs, natty_vecs)
+
+    if verbose:
+        print("Computing Nearest Neighbor Cost MSE")
+    div_dict["nn_mse"] = get_nearest_neighbor_cost_mse(intrv_vecs, natty_vecs)
+
     if compute_all_divergences:
-        if verbose:
-            print("Computing MSE Cost")
-        div_dict["cost_mse"] = get_optimal_mse_cost(intrv_vecs, natty_vecs)
+
 
         if verbose:
             print("Computing Local PCA Cost")
