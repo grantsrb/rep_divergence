@@ -11,3 +11,9 @@ numpy>=1.23.5
 fsspec>=2023.6.0
 accelerate>=0.34.2
 sentencepiece>=0.1.96
+seaborn
+scipy
+scikit-learn
+pandas
+tqdm
+geomloss
