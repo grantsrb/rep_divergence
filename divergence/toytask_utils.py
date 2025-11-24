@@ -114,7 +114,7 @@ def make_tasks(task_division="distinct_y", varbs=None):
             (-1,3), (1,3),
             (-1,4), (1,4),
         }
-    elif task_division=="original":
+    elif task_division=="og_holdouts" or task_division=="original":
         task1_tups = {
             (-1,0), (1,0),
             
@@ -322,7 +322,7 @@ def make_tasks(task_division="distinct_y", varbs=None):
 
 all_divisions = [
     "og_noholdouts",
-    "original",
+    "og_holdouts",
     "shared_y",
     "shared_y_overlap",
     "tetris_L",
