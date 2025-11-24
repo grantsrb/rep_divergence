@@ -99,6 +99,21 @@ def make_tasks(task_division="distinct_y", varbs=None):
             (-1,0), 
                    (1,1),      
         }
+    elif task_division=="og_noholdouts":
+        task1_tups = {
+            (-1,0), (1,0),
+            (-1,1), (1,1),
+            (-1,2), (1,2),
+            (-1,3), (1,3),
+            (-1,4), (1,4),
+        }
+        task2_tups = {
+            (-1,0), (1,0),
+            (-1,1), (1,1),
+            (-1,2), (1,2),
+            (-1,3), (1,3),
+            (-1,4), (1,4),
+        }
     elif task_division=="original":
         task1_tups = {
             (-1,0), (1,0),
@@ -303,9 +318,10 @@ def make_tasks(task_division="distinct_y", varbs=None):
         raise ValueError(f"Invalid task division: {task_division}")
     task1_bools = torch.tensor([(int(x),int(y)) in task1_tups for x,y in varbs])
     task2_bools = torch.tensor([(int(x),int(y)) in task2_tups for x,y in varbs])
-    return task1_bools, task2_bools
+    return {"bools": [task1_bools, task2_bools], "tups": [task1_tups, task2_tups]}
 
 all_divisions = [
+    "og_noholdouts",
     "original",
     "shared_y",
     "shared_y_overlap",
