@@ -20,7 +20,7 @@ pip install -e .
 ```
 
 ## Figure replication
-The code to replicate the main results in the paper are located in the `divergence` folder. The majority of the analyses are in jupyter notebooks.
+The code to replicate the main results in the paper are located in the `divergence` folder. The majority of the analyses are in jupyter notebooks. See `divergence/README.md` for more detailed instructions.
 
 ## Citation
 If you use this repository, you can cite the paper:
