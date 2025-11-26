@@ -25,7 +25,7 @@ The code to replicate the main results in the paper are located in the `divergen
 ## Citation
 If you use this repository, you can cite the paper:
 ```bibtex
-@misc{grant2024repdivergence,
+@misc{grant2025repdivergence,
     title = "Addressing divergent representations from causal interventions on neural networks",
     author = "Grant, Satchel and Han, Simon Jerome and Tartaglini, Alexa and Potts, Christopher",
     month = oct,
