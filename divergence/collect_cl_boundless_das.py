@@ -66,7 +66,7 @@ train_gradient_accumulation_steps = 4
 n_divergence_samples = 5
 use_numpy = False
 debug = False
-save_actvs_dir = "/data2/grantsrb/rep_divergence/cl_boundless_actvs/"
+save_actvs_dir = "./cl_boundless_actvs/"
 save_stamp = datetime.fromtimestamp(time.time()).strftime("%Y%m%d_%H%M%S")
 save_stamp = str(save_stamp)
 
